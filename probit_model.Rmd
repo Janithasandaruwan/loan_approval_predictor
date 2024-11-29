@@ -1,0 +1,282 @@
+---
+title: "Loan Application Approval Predictor"
+author: "Team B"
+date: "2024-11-25"
+output: 
+  html_document:
+    theme:
+      bootswatch: superhero
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Load packages
+```{r}
+library(shiny)
+library(ggplot2)
+library(pROC)
+library(bslib)
+```
+
+#### Load the loan_data csv file
+```{r}
+loan_data <- read.csv("loan_data.csv")
+```
+
+#### Handle missing values by replacing median values
+```{r}
+loan_data$AnnualIncome[is.na(loan_data$AnnualIncome)] <- median(loan_data$AnnualIncome, na.rm = TRUE)
+loan_data$LoanAmount[is.na(loan_data$LoanAmount)] <- median(loan_data$LoanAmount, na.rm = TRUE)
+loan_data$LoanDuration[is.na(loan_data$LoanDuration)] <- median(loan_data$LoanDuration, na.rm = TRUE)
+```
+
+#### Normalize continuous variables
+```{r}
+normalize <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+
+loan_data$AnnualIncome <- normalize(loan_data$AnnualIncome)
+loan_data$CreditScore <- normalize(loan_data$CreditScore)
+loan_data$LoanAmount <- normalize(loan_data$LoanAmount)
+loan_data$LoanDuration <- normalize(loan_data$LoanDuration)
+```
+
+#### Select relevant columns
+```{r}
+data <- loan_data[, c("Age", 
+                      "AnnualIncome", 
+                      "MaritalStatus", 
+                      "CreditScore", 
+                      "TotalDebtToIncomeRatio",
+                      "SavingsAccountBalance",
+                      "PreviousLoanDefaults", 
+                      "PaymentHistory", 
+                      "LoanAmount", 
+                      "LoanDuration", 
+                      "LoanApproved")]
+```
+
+#### Convert necessary variables to factors or numeric types
+```{r}
+data$LoanApproved <- as.factor(data$LoanApproved)
+data$PreviousLoanDefaults <- as.numeric(data$PreviousLoanDefaults)
+data$MaritalStatus <- as.factor(data$MaritalStatus)
+```
+
+#### Fit the probit-model with additional factors
+```{r}
+probit_model <- glm(LoanApproved ~ Age + 
+                      AnnualIncome + 
+                      MaritalStatus + 
+                      CreditScore +
+                      PreviousLoanDefaults + 
+                      PaymentHistory + 
+                      SavingsAccountBalance +
+                      TotalDebtToIncomeRatio + 
+                      LoanAmount + 
+                      LoanDuration, 
+                      family = binomial(link = "probit"), data = data)
+```
+
+#### Summary of the probit-model
+```{r}
+summary(probit_model)
+```
+
+#### Predicted probabilities
+```{r}
+data$PredictedProbability <- predict(probit_model, type = "response")
+```
+
+## [Create plots]{style="color: orange;"}
+#### 01. Plot predicted probabilities
+```{r}
+ggplot(data, 
+       aes(x = PredictedProbability, fill = LoanApproved)) +
+       geom_histogram(binwidth = 0.05, alpha = 0.7, position = "identity") +
+       labs(title = "Predicted Probabilities of Loan Approval", x = "Predicted Probability", y = "Count") +
+       theme_minimal()
+```
+
+#### 02. Coefficient plot
+```{r}
+coef_plot <- data.frame(Term = names(coef(probit_model)),
+                        Estimate = coef(probit_model),
+                        SE = summary(probit_model)$coefficients[, "Std. Error"])
+
+ggplot(coef_plot, aes(x = Term, y = Estimate)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = Estimate - SE, ymax = Estimate + SE), width = 0.2) +
+  labs(title = "Coefficient Estimates with Standard Errors", x = "Variables", y = "Coefficient Estimate") +
+  theme_minimal() +
+  coord_flip()
+```
+
+#### 03. Scatter plot: Predicted probability vs. actual loan approval
+```{r}
+ggplot(data, aes(x = PredictedProbability, color = LoanApproved)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Density Plot of Predicted Probabilities",
+       x = "Predicted Probability",
+       y = "Density") +
+  theme_minimal() +
+  scale_color_manual(values = c("red", "blue"), labels = c("Rejected", "Approved")) +
+  theme(legend.title = element_blank())
+```
+
+#### 04. Histogram: Count of predicted probabilities for approved vs. rejected
+```{r}
+ggplot(data, aes(x = PredictedProbability, fill = LoanApproved)) +
+  geom_histogram(binwidth = 0.05, position = "dodge", alpha = 0.7) +
+  labs(title = "Approved vs. Rejected Applications by Predicted Probability",
+       x = "Predicted Probability",
+       y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("red", "blue"), labels = c("Rejected", "Approved")) +
+  theme(legend.title = element_blank())
+```
+
+#### Plot ROC curve
+```{r}
+roc_curve <- roc(data$LoanApproved, data$PredictedProbability)
+plot(roc_curve, main = "ROC Curve", col = "blue")
+```
+
+## [Check the probit-model accuracy]{style="color: orange;"}
+```{r}
+# Classify predictions based on a threshold of 0.5
+data$PredictedClass <- ifelse(data$PredictedProbability > 0.56, 1, 0)
+
+# Convert actual loan approvals to numeric for comparison
+data$ActualClass <- as.numeric(as.character(data$LoanApproved))
+
+# Confusion Matrix
+confusion_matrix <- table(Predicted = data$PredictedClass, Actual = data$ActualClass)
+print(confusion_matrix)
+
+# Calculate accuracy
+accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+print(paste("Model Accuracy:", round(accuracy, 4) * 100, "%"))
+```
+
+## [Loan Approval Predictor]{style="color: green;"}
+```{r}
+loan_approval_predictor <- function(probit_model, user_data) {
+  # Encode Marital Status as a factor with the same levels as in training data
+  marital_status_factor <- factor(user_data$marital_status, levels = c("Single", "Married", "Divorced"))
+  
+  # Normalize numeric inputs using the dataset's mean and sd
+  normalize_data <- function(x, mean_val, sd_val) {
+    (x - mean_val) / sd_val
+  }
+  # Normalize numeric inputs using the dataset's mean and sd
+  income_norm <- normalize_data(user_data$annual_income, mean(data$AnnualIncome), sd(data$AnnualIncome))
+  credit_score_norm <- normalize_data(user_data$credit_score, mean(data$CreditScore), sd(data$CreditScore))
+  loan_amount_norm <- normalize_data(user_data$loan_amount, mean(data$LoanAmount), sd(data$LoanAmount))
+  loan_duration_norm <- normalize_data(user_data$loan_duration, mean(data$LoanDuration), sd(data$LoanDuration))
+
+    # Create a data frame for prediction
+  new_data <- data.frame(
+    Age = user_data$age,
+    AnnualIncome = income_norm,
+    MaritalStatus = marital_status_factor,
+    CreditScore = credit_score_norm,
+    TotalDebtToIncomeRatio = user_data$debt_ratio,
+    SavingsAccountBalance = user_data$saving,
+    PreviousLoanDefaults = as.numeric(user_data$previous_defaults),
+    PaymentHistory = as.numeric(user_data$repayment_score),
+    LoanAmount = loan_amount_norm,
+    LoanDuration = loan_duration_norm
+  )
+  # Ensure factor levels in new_data match training data
+  new_data$MaritalStatus <- factor(new_data$MaritalStatus, levels = levels(data$MaritalStatus))
+  
+  # Predict loan approval
+  predicted_probability <- predict(probit_model, new_data, type = "response")
+  result <- ifelse(predicted_probability > 0.56, "Approved", "Rejected")
+  cat("Predicted Probability of Approval:", predicted_probability, "\n")
+  # Return the results
+  return (result)
+}
+``` 
+
+```{r echo=FALSE}
+knitr::include_graphics("/Users/janithasandaruwan/Desktop/probit_model/model_image.png")
+```
+
+#### Get user data
+```{r}
+applicant_data <- fluidPage(
+  theme = bs_theme(bg = "darkgray", fg = "black", primary = "orange"),
+  # Add input fields
+  numericInput("age", strong("Age In Years:"), value = 10, min = 10, step = 1),
+  numericInput("annual_income", strong("Annual Income (SEK):"), value = 10, min = 0, step = 10),
+  # Radio buttons for marital status
+  radioButtons(
+    inputId = "marital_status",
+    label = strong("Marital Status:"),
+    choices = c(
+      "Single" = "Single",
+      "Married" = "Married",
+      "Divorced" = "Divorced"
+    ),
+    selected = NULL
+  ),
+  numericInput("credit_score", strong("Credit Score:"), value = 350, min = 0, step = 10),
+  numericInput("debt_ratio", strong("Debt-to-Income Ratio:"), value = 0.51, min = 0, step = 0.01),
+  numericInput("saving", strong("Saving Account Balance (SEK):"), value = 1000, min = 0, step = 10),
+  # Radio buttons for previous loan defaults
+  radioButtons(
+    inputId = "previous_defaults",
+    label = strong("Previous Loan Defaults:"),
+    choices = c(
+      "Yes" = 1,
+      "No" = 0
+    ),
+    selected = NULL
+  ),
+  # Slider input for selecting a repayment history score
+  sliderInput(
+    inputId = "repayment_score",     
+    label = strong("Loan Repayment History Score:"),    
+    min = 1,                      
+    max = 10,                     
+    value = 5,                    
+    step = 1                      
+  ),
+  numericInput("loan_amount", strong("Loan Amount (SEK):"), value = 5000, min = 0, step = 500),
+  numericInput("loan_duration", strong("Loan Duration (Months):"), value = 12, min = 12, step = 12),
+  # Add an action button
+  actionButton("submit", strong("Submit")),
+  # Add a blank line
+  br(),
+  br(),
+  # Add a placeholder for displaying the output
+  verbatimTextOutput("result"),
+  br(),
+  br()
+)
+
+# Loan approval predictor function
+run_predictor <- function(input, output, session) {
+  # Reactive expression to run the model when the submit button is pressed
+  result <- eventReactive(input$submit, {
+    # Call the probit-model function 
+    loan_approval_predictor(probit_model, input)
+  })
+  
+  # Display the prediction result
+  output$result <- renderText({
+    paste("Loan Approval Result:", result())
+  })
+  
+}
+```
+
+## [Enter Applicant Data]{style="color: yellow;"}
+```{r}
+# Run the app
+shinyApp(ui = applicant_data, server = run_predictor)
+```
